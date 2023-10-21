@@ -6,8 +6,11 @@ import tempfile
 import numpy as np
 import cv2
 import glob
-import easygui
-from tkinter import filedialog
+try:
+    import easygui
+    from tkinter import filedialog
+except ModuleNotFoundError:
+    pass
 from numba import njit
 from engineering_notation import EngNumber as eng
 from pathlib import Path
