@@ -11,6 +11,7 @@ import sys
 import torch
 
 from v2ecore.easy_v2e import EasyV2EConverter
+from v2ecore.easy_v2e_utils import DVSModel, DVSEventOutput
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -67,7 +68,19 @@ def main() -> None:
             "to generate the correct conda install command to enable GPU-accelerated CUDA."
         )
 
-    converter = EasyV2EConverter(torch_device, logger=logger)
+    converter = EasyV2EConverter(
+        torch_device,
+        timestamp_resolution=0.003,
+        auto_timestamp_resolution=False,
+        pos_thres=0.15,
+        neg_thres=0.15,
+        sigma_thres=0.03,
+        dvs_event_output=DVSEventOutput.DVS_AEDAT4,
+        cutoff_hz=15,
+        dvs_model=DVSModel.DVS346,
+        slomo_model="/home/piotr/easy-v2e/input/SuperSloMo39.ckpt",
+        logger=logger,
+    )
 
     converter.convert_video(args.input, output_folder="output", dvs_vid="tennis")
     return
