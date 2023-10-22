@@ -4,6 +4,7 @@ import importlib
 import os
 import sys
 from tempfile import TemporaryDirectory
+from typing import Any
 
 import argcomplete
 import cv2
@@ -34,7 +35,12 @@ from v2ecore.v2e_utils import (
     set_output_folder,
     v2e_quit,
 )
-from v2ecore.easy_v2e_utils import DVSParams, DVSModel, DVSEventOutput
+from v2ecore.easy_v2e_utils import (
+    DVSParams,
+    DVSModel,
+    DVSEventOutput,
+    easy_set_output_dimension,
+)
 
 
 class EasyV2EConverter:
@@ -73,6 +79,7 @@ class EasyV2EConverter:
         output_height: int = None,
         dvs_model: DVSModel | None = None,
         disable_slowmo: bool = False,
+        input_slowmotion_factor: float = 1.0,
         slomo_model: str | None = None,
         batch_size: int = 8,
         hdr: bool = False,
@@ -189,6 +196,7 @@ class EasyV2EConverter:
         self._dvs_model: DVSModel = dvs_model  # DVS128 DVS240 DVS346 DVS640 DVS1024
         # slow motion frame synthesis
         self._disable_slowmo: bool = disable_slowmo
+        self._input_slowmotion_factor: bool = input_slowmotion_factor
         self._slomo_model: str | None = slomo_model
         self._batch_size: int = batch_size
         self._hdr: bool = hdr
@@ -204,24 +212,57 @@ class EasyV2EConverter:
         self._label_signal_noise: str | None = label_signal_noise  # TODO implement
         self._dvs_exposure: list[str] = dvs_exposure
         self._dvs_vid_full_scale: int = dvs_vid_full_scale
-        # create emulator
-        self._emulator: EventEmulator = self._create_emulator()
-
+        # set output width and height based on the arguments
+        self._output_width, self._output_height = easy_set_output_dimension(
+            self._output_width, self._output_height, self._dvs_model, self._logger
+        )
         # validate params
+        self._validate_video_parameters()
         self._validate_leak_rate()
+        # DVS
+        self._emulator: EventEmulator | None = None
+        self._event_renderer: EventRenderer | None = None
+        self._slomo: SuperSloMo | None = None
+        # TODO temp
+        self._slowdown_factor = None
 
     def convert_video(
-        self, input_file: str, output_folder: str, dvs_vid: str, preview: bool = False
+        self,
+        input_file: str,
+        output_folder: str,
+        dvs_vid: str | None = None,
+        overwrite: bool = False,
+        preview: bool = False,
     ) -> None:
         """TODO"""
-        self._validate_slomo(input_file)
+        # input file checking
+        self._validate_input(input_file)
+        # TODO change to params
+        input_start_time, input_stop_time = None, 2
+        self._check_input_time(input_start_time, input_stop_time)
 
-        exposure_mode, exposure_val, area_dimension = self._v2e_check_dvs_exposure()
+        exposure_mode, exposure_val, area_dimension = self._easy_check_dvs_exposure()
 
         if exposure_mode == ExposureMode.DURATION:
-            dvsFps = 1.0 / exposure_val
+            dvs_fps = 1.0 / exposure_val
 
-        eventRenderer = EventRenderer(
+        cap, dvs_fps, src_num_frames = self._validate_input_file_type(input_file)
+        (
+            src_total_duration,
+            src_frame_interval_s,
+            start_frame,
+            stop_frame,
+            src_num_frames_to_be_proccessed,
+            start_time,
+            stop_time,
+        ) = self._validate_slowmo(
+            dvs_fps, src_num_frames, input_start_time, input_stop_time
+        )
+
+        # create emulator
+        self._emulator: EventEmulator = self._create_emulator(dvs_vid, output_folder)
+
+        self._event_renderer = EventRenderer(
             output_path=output_folder,
             dvs_vid=dvs_vid,
             preview=preview,
@@ -231,17 +272,31 @@ class EasyV2EConverter:
             area_dimension=area_dimension,
             avi_frame_rate=self._avi_frame_rate,
         )
+
+        self._run_stages(
+            cap,
+            input_file,
+            src_num_frames_to_be_proccessed,
+            src_frame_interval_s,
+            start_frame,
+            stop_frame,
+            start_time,
+            stop_time,
+        )
+
+        self._clean_up()
+
         return
 
-    def _create_emulator(self) -> EventEmulator:
-        """TODO"""
+    def _create_emulator(self, output_file: str, output_folder: str) -> EventEmulator:
+        """Function that creates emulator object."""
         (
             ddd_output,
             dvs_h5,
             dvs_aedat2,
             dvs_aedat4,
             dvs_text,
-        ) = self._validate_dvs_output()
+        ) = self._validate_dvs_output(output_file)
         emulator = EventEmulator(
             pos_thres=self._pos_thres,
             neg_thres=self._neg_thres,
@@ -254,7 +309,7 @@ class EasyV2EConverter:
             noise_rate_cov_decades=self._noise_rate_cov_decades,
             refractory_period_s=self._refractory_period,
             seed=self._dvs_emulator_seed,
-            output_folder=None,
+            output_folder=output_folder,
             dvs_h5=dvs_h5,
             dvs_aedat2=dvs_aedat2,
             dvs_aedat4=dvs_aedat4,
@@ -284,20 +339,51 @@ class EasyV2EConverter:
 
         return emulator
 
-    def _validate_slomo(
-        self, input_file: str, input_frame_rate: float | None = None
-    ) -> None:
-        """TODO"""
-        cap = cv2.VideoCapture(input_file)
-        srcFps = cap.get(cv2.CAP_PROP_FPS)
-        srcNumFrames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    def _check_input_time(self, input_start_time, input_stop_time) -> tuple:
+        def is_float(element: Any) -> bool:
+            try:
+                float(element)
+                return True
+            except ValueError:
+                return False
 
-        if input_frame_rate is not None:
-            if self._logger:
-                self._logger.info(
-                    f"Input video frame rate {srcFps}Hz is overridden by parsing input_frame_rate={input_frame_rate}."
+        if (
+            not input_start_time is None
+            and not input_stop_time is None
+            and is_float(input_start_time)
+            and is_float(input_stop_time)
+            and input_stop_time <= input_start_time
+        ):
+            self._logger.error(
+                f"stop time {input_stop_time} must be later than start time {input_start_time}"
+            )
+            v2e_quit(1)
+
+    def _validate_input_file_type(
+        self, input_file: str, input_frame_rate: float | None = None
+    ) -> tuple:
+        """TODO"""
+        if os.path.isdir(input_file):
+            if input_frame_rate is None:
+                self._logger.error(
+                    "When the video is presented as a folder, "
+                    "The user must set input_frame_rate manually"
                 )
-            srcFps = input_frame_rate
+                v2e_quit(1)
+
+            cap = ImageFolderReader(input_file, self._input_frame_rate)
+            src_fps = cap.frame_rate
+            src_num_frames = cap.num_frames
+        else:
+            cap = cv2.VideoCapture(input_file)
+            src_fps = cap.get(cv2.CAP_PROP_FPS)
+            src_num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            if input_frame_rate is not None:
+                if self._logger:
+                    self._logger.info(
+                        f"Input video frame rate {src_fps}Hz is overridden by parsing input_frame_rate={input_frame_rate}."
+                    )
+                src_fps = input_frame_rate
 
         if cap is not None:
             set_size = False
@@ -324,7 +410,7 @@ class EasyV2EConverter:
                 )
 
         # Check frame rate and number of frames
-        if srcFps == 0:
+        if src_fps == 0:
             if self._logger:
                 self._logger.error(
                     "source {} fps is 0; v2e needs to have a timescale "
@@ -332,7 +418,7 @@ class EasyV2EConverter:
                 )
             v2e_quit()
 
-        if srcNumFrames < 2:
+        if src_num_frames < 2:
             if self._logger:
                 self._logger.warning(
                     "num frames is less than 2, probably cannot be determined "
@@ -340,23 +426,202 @@ class EasyV2EConverter:
                 )
             v2e_quit()
 
-        return
+        return cap, src_fps, src_num_frames
 
-    def _validate_dvs_output(self) -> list:
+    def _validate_dvs_output(self, output_file: str) -> list:
         """TODO"""
         return [
-            dvs_out if dvs_out == self._dvs_event_output else None
+            output_file if dvs_out == self._dvs_event_output.value else None
             for dvs_out in DVSEventOutput.list()
         ]
 
     def _validate_leak_rate(self) -> None:
+        """TODO"""
         if self._leak_rate_hz > 0 and self._sigma_thres == 0 and self._logger:
             self._logger.warning(
                 "leak_rate_hz>0 but sigma_thres==0, "
                 "so all leak events will be synchronous"
             )
 
-    def _v2e_check_dvs_exposure(self) -> list:
+    def _validate_input(self, input_file: str) -> None:
+        """TODO"""
+        if not os.path.isfile(input_file) and not os.path.isdir(input_file):
+            self._logger.error("input file {} does not exist".format(input_file))
+            v2e_quit(1)
+        if os.path.isdir(input_file):
+            if len(os.listdir(input_file)) == 0:
+                self._logger.error(f"input folder {input_file} is empty")
+                v2e_quit(1)
+
+    def _validate_video_parameters(self) -> None:
+        """TODO"""
+        if (
+            not self._disable_slowmo
+            and self._auto_timestamp_resolution is False
+            and self._timestamp_resolution is None
+        ):
+            self._logger.error(
+                "if auto_timestamp_resolution=False, "
+                "then timestamp_resolution must be set to "
+                "some desired DVS event timestamp resolution in seconds, "
+                "e.g. 0.01"
+            )
+            v2e_quit()
+
+        if (
+            self._auto_timestamp_resolution is True
+            and self._timestamp_resolution is not None
+        ):
+            self._logger.info(
+                f"auto_timestamp_resolution=True and "
+                f"timestamp_resolution={self._timestamp_resolution}: "
+                f"Limiting automatic upsampling to maximum timestamp interval."
+            )
+
+    def _validate_slowmo(
+        self,
+        src_fps: float,
+        src_num_frames: float,
+        input_start_time: float | None = None,
+        input_stop_time: float | None = None,
+        preview: bool = False,
+    ) -> tuple:
+        """TODO"""
+        src_total_duration = (src_num_frames - 1) / src_fps
+        # the index of the frames, from 0 to srcNumFrames-1
+        start_frame = (
+            int(src_num_frames * (input_start_time / src_total_duration))
+            if input_start_time
+            else 0
+        )
+        stop_frame = (
+            int(src_num_frames * (input_stop_time / src_total_duration))
+            if input_stop_time
+            else src_num_frames - 1
+        )
+        src_num_frames_to_be_proccessed = stop_frame - start_frame + 1
+        # the duration to be processed, should subtract 1 frame when
+        # calculating duration
+        src_duration_to_be_processed = (src_num_frames_to_be_proccessed - 1) / src_fps
+
+        # redefining start and end time using the time calculated
+        # from the frames, the minimum resolution there is
+        start_time = start_frame / src_fps
+        stop_time = stop_frame / src_fps
+
+        src_frame_interval_s = (1.0 / src_fps) / self._input_slowmotion_factor
+
+        slowdown_factor = NO_SLOWDOWN
+        if self._disable_slowmo:
+            self._logger.warning(
+                "slomo interpolation disabled by command line option; "
+                "output DVS timestamps will have source frame interval "
+                "resolution"
+            )
+            # time stamp resolution equals to source frame interval
+            slomo_timestamp_tesolution_s = src_frame_interval_s
+        elif not self._auto_timestamp_resolution:
+            slowdown_factor = int(
+                np.ceil(src_frame_interval_s / self._timestamp_resolution)
+            )
+            if slowdown_factor < NO_SLOWDOWN:
+                slowdown_factor = NO_SLOWDOWN
+                self._logger.warning(
+                    "timestamp resolution={}s is >= source "
+                    "frame interval={}s, will not upsample".format(
+                        self._timestamp_resolution, src_frame_interval_s
+                    )
+                )
+            elif slowdown_factor > 100 and self._cutoff_hz == 0:
+                self._logger.warning(
+                    f"slowdown_factor={slowdown_factor} is >100 but "
+                    "cutoff_hz={cutoff_hz}. We have observed that "
+                    "numerical errors in SuperSloMo can cause noise "
+                    "that makes fake events at the upsampling rate. "
+                    "Recommend to set physical cutoff_hz, "
+                    "e.g. --cutoff_hz=200 (or leave the default cutoff_hz)"
+                )
+            slomo_timestamp_tesolution_s = src_frame_interval_s / slowdown_factor
+
+            self._logger.info(
+                f"--auto_timestamp_resolution is False, "
+                f"srcFps={src_fps}Hz "
+                f"input_slowmotion_factor={self._input_slowmotion_factor}, "
+                f"real src FPS={src_fps*self._input_slowmotion_factor}Hz, "
+                f"srcFrameIntervalS={eng(src_frame_interval_s)}s, "
+                f"timestamp_resolution={eng(self._timestamp_resolution)}s, "
+                f"so SuperSloMo will use slowdown_factor={slowdown_factor} "
+                f"and have "
+                f"slomoTimestampResolutionS={eng(slomo_timestamp_tesolution_s)}s"
+            )
+
+            if slomo_timestamp_tesolution_s > self._timestamp_resolution:
+                self._logger.warning(
+                    "Upsampled src frame intervals of {}s is larger than\n "
+                    "the desired DVS timestamp resolution of {}s".format(
+                        slomo_timestamp_tesolution_s, self._timestamp_resolution
+                    )
+                )
+
+            check_lowpass(
+                self._cutoff_hz, 1 / slomo_timestamp_tesolution_s, self._logger
+            )
+        else:  # auto_timestamp_resolution
+            if self._timestamp_resolution is not None:
+                self._slowdown_factor = int(
+                    np.ceil(src_frame_interval_s / self._timestamp_resolution)
+                )
+
+                self._logger.info(
+                    f"--auto_timestamp_resolution=True and "
+                    f"timestamp_resolution={eng(self._timestamp_resolution)}s: "
+                    f"source video will be automatically upsampled but "
+                    f"with at least upsampling factor of {slowdown_factor}"
+                )
+            else:
+                self._logger.info(
+                    "--auto_timestamp_resolution=True and "
+                    "timestamp_resolution is not set: "
+                    "source video will be automatically upsampled to "
+                    "limit maximum interframe motion to 1 pixel"
+                )
+
+        # the SloMo model, set no SloMo model if no slowdown
+        if not self._disable_slowmo and (
+            self._auto_timestamp_resolution or slowdown_factor != NO_SLOWDOWN
+        ):
+            self._slomo = SuperSloMo(
+                model=self._slomo_model,
+                auto_upsample=self._auto_timestamp_resolution,
+                upsampling_factor=slowdown_factor,
+                video_path=None,  # TODO add params
+                vid_orig=None,
+                vid_slomo=None,
+                preview=preview,
+                batch_size=self._batch_size,
+            )
+            return (
+                src_total_duration,
+                src_frame_interval_s,
+                start_frame,
+                stop_frame,
+                src_num_frames_to_be_proccessed,
+                start_time,
+                stop_time,
+            )
+
+        return (
+            src_total_duration,
+            src_frame_interval_s,
+            start_frame,
+            stop_frame,
+            src_num_frames_to_be_proccessed,
+            start_time,
+            stop_time,
+        )
+
+    def _easy_check_dvs_exposure(self) -> list:
+        """TODO"""
         dvs_exposure = self._dvs_exposure
         exposure_mode = None
         exposure_val = None
@@ -417,3 +682,260 @@ class EasyV2EConverter:
         if self._logger:
             self._logger.info(s)
         return exposure_mode, exposure_val, area_dimension
+
+    def _run_stages(
+        self,
+        cap: cv2.VideoCapture,
+        input_file: str,
+        src_num_frames_to_be_proccessed: int,
+        src_frame_interval_s,
+        start_frame,
+        stop_frame,
+        start_time,
+        stop_time,
+    ) -> None:
+        """TODO"""
+        # timestamps of DVS start at zero and end with
+        # span of video we processed
+        src_video_real_processed_duration = (
+            stop_time - start_time
+        ) / self._input_slowmotion_factor
+        num_frames = src_num_frames_to_be_proccessed
+        inputHeight = None
+        inputWidth = None
+        inputChannels = None
+        if start_frame > 0:
+            self._logger.info("skipping to frame {}".format(start_frame))
+            for i in tqdm(range(start_frame), unit="fr", desc="src"):
+                if isinstance(cap, ImageFolderReader):
+                    if i < start_frame - 1:
+                        ret, _ = cap.read(skip=True)
+                    else:
+                        ret, _ = cap.read()
+                else:
+                    ret, _ = cap.read()
+                if not ret:
+                    raise ValueError(
+                        "something wrong, got to end of file before "
+                        "reaching start_frame"
+                    )
+
+        self._logger.info(
+            "processing frames {} to {} from video input".format(
+                start_frame, stop_frame
+            )
+        )
+        num_frames = src_num_frames_to_be_proccessed
+
+        with TemporaryDirectory() as source_frames_dir:
+            if os.path.isdir(input_file):  # folder input
+                inputWidth = cap.frame_width
+                inputHeight = cap.frame_height
+                inputChannels = cap.frame_channels
+            else:
+                inputWidth = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+                inputHeight = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+                inputChannels = 1 if int(cap.get(cv2.CAP_PROP_MONOCHROME)) else 3
+            self._logger.info(
+                "Input video {} has W={} x H={} frames each with {} channels".format(
+                    input_file, inputWidth, inputHeight, inputChannels
+                )
+            )
+
+            if (self._output_width is None) and (self._output_height is None):
+                self._output_width = inputWidth
+                self._output_height = inputHeight
+                self._logger.warning(
+                    "output size ({}x{}) was set automatically to "
+                    "input video size\n    Are you sure you want this? "
+                    "It might be slow.\n Consider using\n "
+                    "    --output_width=346 --output_height=260\n "
+                    "to match Davis346.".format(self._output_width, self._output_height)
+                )
+
+                # set emulator output width and height for the last time
+                self._emulator.output_width = self._output_width
+                self._emulator.output_height = self._output_height
+
+            self._logger.info(
+                f"*** Stage 1/3: "
+                f"Resizing {src_num_frames_to_be_proccessed} input frames "
+                f"to output size "
+                f"(with possible RGB to luma conversion)"
+            )
+            for inputFrameIndex in tqdm(
+                range(src_num_frames_to_be_proccessed), desc="rgb2luma", unit="fr"
+            ):
+                # read frame
+                ret, input_video_frame = cap.read()
+                num_frames += 1
+                if ret == False:
+                    self._logger.warning(
+                        f"could not read frame {inputFrameIndex} from {cap}"
+                    )
+                    continue
+                if input_video_frame is None or np.shape(input_video_frame) == ():
+                    self._logger.warning(
+                        f"empty video frame number {inputFrameIndex} in {cap}"
+                    )
+                    continue
+                if not ret or inputFrameIndex + start_frame > stop_frame:
+                    break
+
+                if (
+                    self._output_height
+                    and self._output_width
+                    and (
+                        inputHeight != self._output_height
+                        or inputWidth != self._output_width
+                    )
+                ):
+                    dim = (self._output_width, self._output_height)
+                    (fx, fy) = (
+                        float(self._output_width) / inputWidth,
+                        float(self._output_height) / inputHeight,
+                    )
+                    input_video_frame = cv2.resize(
+                        src=input_video_frame,
+                        dsize=dim,
+                        fx=fx,
+                        fy=fy,
+                        interpolation=cv2.INTER_AREA,
+                    )
+                if inputChannels == 3:  # color
+                    if inputFrameIndex == 0:  # print info once
+                        self._logger.info(
+                            "\nConverting input frames from RGB color to luma"
+                        )
+                    # TODO would break resize if input is gray frames
+                    # convert RGB frame into luminance.
+                    input_video_frame = cv2.cvtColor(
+                        input_video_frame, cv2.COLOR_BGR2GRAY
+                    )  # much faster
+
+                    # TODO add vid_orig output if not using slomo
+
+                # save frame into numpy records
+                save_path = os.path.join(
+                    source_frames_dir, str(inputFrameIndex).zfill(8) + ".npy"
+                )
+                np.save(save_path, input_video_frame)
+                # print("Writing source frame {}".format(save_path), end="\r")
+            cap.release()
+
+            with TemporaryDirectory() as interpFramesFolder:
+                interpTimes = None
+                # make input to slomo
+                if self._slomo is not None and (
+                    self._auto_timestamp_resolution
+                    or self._slowdown_factor != NO_SLOWDOWN
+                ):
+                    # interpolated frames are stored to tmpfolder as
+                    # 1.png, 2.png, etc
+
+                    self._logger.info(
+                        f"*** Stage 2/3: SloMo upsampling from " f"{source_frames_dir}"
+                    )
+                    interpTimes, avgUpsamplingFactor = self._slomo.interpolate(
+                        source_frames_dir,
+                        interpFramesFolder,
+                        (self._output_width, self._output_height),
+                    )
+                    avgTs = src_frame_interval_s / avgUpsamplingFactor
+                    self._logger.info(
+                        "SloMo average upsampling factor={:5.2f}; "
+                        "average DVS timestamp resolution={}s".format(
+                            avgUpsamplingFactor, eng(avgTs)
+                        )
+                    )
+                    # check for undersampling wrt the
+                    # photoreceptor lowpass filtering
+
+                    if self._cutoff_hz > 0:
+                        self._logger.info(
+                            "Using auto_timestamp_resolution. "
+                            "checking if cutoff hz is ok given "
+                            "sample rate {}".format(1 / avgTs)
+                        )
+                        check_lowpass(self._cutoff_hz, 1 / avgTs, self._logger)
+
+                    # read back to memory
+                    interpFramesFilenames = all_images(interpFramesFolder)
+                    # number of frames
+                    n = len(interpFramesFilenames)
+                else:
+                    self._logger.info(
+                        f"*** Stage 2/3:turning npy frame files to png "
+                        f"from {source_frames_dir}"
+                    )
+                    interpFramesFilenames = []
+                    n = 0
+                    src_files = sorted(
+                        glob.glob("{}".format(source_frames_dir) + "/*.npy")
+                    )
+                    for frame_idx, src_file_path in tqdm(
+                        enumerate(src_files), desc="npy2png", unit="fr"
+                    ):
+                        src_frame = np.load(src_file_path)
+                        tgt_file_path = os.path.join(
+                            interpFramesFolder, str(frame_idx) + ".png"
+                        )
+                        interpFramesFilenames.append(tgt_file_path)
+                        n += 1
+                        cv2.imwrite(tgt_file_path, src_frame)
+                    interpTimes = np.array(range(n))
+
+                # compute times of output integrated frames
+                nFrames = len(interpFramesFilenames)
+                # interpTimes is in units of 1 per input frame,
+                # normalize it to src video time range
+                f = src_video_real_processed_duration / (
+                    np.max(interpTimes) - np.min(interpTimes)
+                )
+                # compute actual times from video times
+                interpTimes = f * interpTimes
+
+                # array to batch events for rendering to DVS frames
+                events = np.zeros((0, 4), dtype=np.float32)
+
+                self._logger.info(
+                    f"*** Stage 3/3: emulating DVS events from " f"{nFrames} frames"
+                )
+
+                # parepare extra steps for data storage
+                # right before event emulation
+                # if args.ddd_output:
+                #     self._emulator.prepare_storage(nFrames, interpTimes)
+
+                # generate events from frames and accumulate events to DVS frames for output DVS video
+                with tqdm(total=nFrames, desc="dvs", unit="fr") as pbar:
+                    with torch.no_grad():
+                        for i in range(nFrames):
+                            fr = read_image(interpFramesFilenames[i])
+                            newEvents = self._emulator.generate_events(
+                                fr, interpTimes[i]
+                            )
+
+                            pbar.update(1)
+                            if newEvents is not None and newEvents.shape[0] > 0:
+                                events = np.append(events, newEvents, axis=0)
+                                events = np.array(events)
+                                if i % self._batch_size == 0:
+                                    self._event_renderer.render_events_to_frames(
+                                        events,
+                                        height=self._output_height,
+                                        width=self._output_width,
+                                    )
+                                    events = np.zeros((0, 4), dtype=np.float32)
+                    # process leftover events
+                    if len(events) > 0:
+                        self._event_renderer.render_events_to_frames(
+                            events, height=self._output_height, width=self._output_width
+                        )
+        return
+
+    def _clean_up(self) -> None:
+        self._event_renderer.cleanup()
+        self._emulator.cleanup()
+        if self._slomo is not None:
+            self._slomo.cleanup()

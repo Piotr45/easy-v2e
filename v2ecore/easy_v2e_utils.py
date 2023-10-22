@@ -5,6 +5,7 @@ Utils used in easy
 @contact: piotr.baryczkowski@student.put.poznan.pl
 """
 import enum
+import logging
 
 
 class DVSParams(enum.Enum):
@@ -77,3 +78,23 @@ class DVSEventOutput(enum.Enum):
 
     def __str__(self):
         return str(self.value)
+
+
+def easy_set_output_dimension(
+    output_width: int, output_height: int, dvs_model: DVSModel, logger: logging.Logger
+) -> tuple:
+    """Return output_height and output_width based on arguments."""
+
+    if dvs_model is not None:
+        return dvs_model.value
+
+    if (output_width is None) or (output_height is None):
+        logger.warning(
+            "Either output_width is None or output_height is None,"
+            "or both. Setting both of them to None. \n"
+            "Dimension will be set automatically from video input if available. \n"
+            "Check DVS camera size arguments."
+        )
+        output_width, output_height = None, None
+
+    return output_width, output_height
