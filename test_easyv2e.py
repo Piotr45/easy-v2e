@@ -28,61 +28,58 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         help="Path to video.",
     )
 
+    arg_parser.add_argument(
+        "-o",
+        "--output-dir",
+        type=str,
+        action="store",
+        required=False,
+        default="output",
+        help="Path to output directtory.",
+    )
+
+    arg_parser.add_argument(
+        "--output-file",
+        type=str,
+        action="store",
+        required=False,
+        default="output",
+        help="Filename of the output dvs video.",
+    )
+
+    arg_parser.add_argument(
+        "--slomo-model",
+        type=str,
+        action="store",
+        required=False,
+        default=None,
+        help="Path to SuperSloMo model.",
+    )
+
     return arg_parser.parse_args()
-
-
-def setup_logger() -> logging.Logger:
-    logging.basicConfig()
-    root = logging.getLogger()
-    LOGGING_LEVEL = logging.INFO
-    root.setLevel(LOGGING_LEVEL)  # todo move to info for production
-    # https://stackoverflow.com/questions/384076/how-can-i-color-python-logging-output/7995762#7995762
-    logging.addLevelName(
-        logging.DEBUG, "\033[1;36m%s\033[1;0m" % logging.getLevelName(logging.DEBUG)
-    )  # cyan foreground
-    logging.addLevelName(
-        logging.INFO, "\033[1;34m%s\033[1;0m" % logging.getLevelName(logging.INFO)
-    )  # blue foreground
-    logging.addLevelName(
-        logging.WARNING, "\033[1;31m%s\033[1;0m" % logging.getLevelName(logging.WARNING)
-    )  # red foreground
-    logging.addLevelName(
-        logging.ERROR, "\033[38;5;9m%s\033[1;0m" % logging.getLevelName(logging.ERROR)
-    )  # red background
-    logger = logging.getLogger(__name__)
-    return logger
 
 
 def main() -> None:
     args = parse_args(sys.argv[1:])
-    logger = setup_logger()
 
     torch_device: str = torch.device(
         "cuda" if torch.cuda.is_available() else "cpu"
     ).type
-    logger.info(f"torch device is {torch_device}")
-    if torch_device == "cpu":
-        logger.warning(
-            "CUDA GPU acceleration of pytorch operations is not available; "
-            "see https://pytorch.org/get-started/locally/ "
-            "to generate the correct conda install command to enable GPU-accelerated CUDA."
-        )
 
     converter = EasyV2EConverter(
         torch_device,
         timestamp_resolution=0.003,
         auto_timestamp_resolution=False,
-        pos_thres=0.15,
-        neg_thres=0.15,
-        sigma_thres=0.03,
-        dvs_event_output=DVSEventOutput.DVS_AEDAT4,
         cutoff_hz=15,
         dvs_model=DVSModel.DVS346,
-        slomo_model="/home/piotr/easy-v2e/input/SuperSloMo39.ckpt",
-        logger=logger,
+        slomo_model=args.slomo_model,
     )
 
-    converter.convert_video(args.input, output_folder="output", dvs_vid="tennis")
+    converter.convert_video(
+        args.input,
+        output_folder=args.output_dir,
+        dvs_vid=args.output_file,
+    )
     return
 
 
