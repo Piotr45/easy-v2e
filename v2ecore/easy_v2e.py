@@ -54,6 +54,30 @@ class EasyV2EConverter:
     @contact: piotr.baryczkowski@student.put.poznan.pl
     """
 
+    @staticmethod
+    def setup_logger() -> logging.Logger:
+        logging.basicConfig()
+        root = logging.getLogger()
+        LOGGING_LEVEL = logging.INFO
+        root.setLevel(LOGGING_LEVEL)  # todo move to info for production
+        # https://stackoverflow.com/questions/384076/how-can-i-color-python-logging-output/7995762#7995762
+        logging.addLevelName(
+            logging.DEBUG, "\033[1;36m%s\033[1;0m" % logging.getLevelName(logging.DEBUG)
+        )  # cyan foreground
+        logging.addLevelName(
+            logging.INFO, "\033[1;34m%s\033[1;0m" % logging.getLevelName(logging.INFO)
+        )  # blue foreground
+        logging.addLevelName(
+            logging.WARNING,
+            "\033[1;31m%s\033[1;0m" % logging.getLevelName(logging.WARNING),
+        )  # red foreground
+        logging.addLevelName(
+            logging.ERROR,
+            "\033[38;5;9m%s\033[1;0m" % logging.getLevelName(logging.ERROR),
+        )  # red background
+        logger = logging.getLogger(__name__)
+        return logger
+
     def __init__(
         self,
         device: str,
@@ -91,6 +115,7 @@ class EasyV2EConverter:
         dvs_exposure: list[str] = ("duration", "0.005"),
         dvs_vid_full_scale: int = 2,
         logger: logging.Logger | None = None,
+        disable_logger: bool = False,
     ) -> None:
         """
         Parameters
@@ -166,7 +191,9 @@ class EasyV2EConverter:
         dvs_vid_full_scale:
             TODO
         logger:
-            TODO
+            Logger class object to log progress of the module.
+        disable_logger:
+            Disables logger.
         """
         self.device: str = device
         # timestamp resolution
@@ -206,7 +233,12 @@ class EasyV2EConverter:
         # SCIDVS pixel study
         self._scvids: bool = scidvs
         # logging
-        self._logger: logging.Logger = logger
+        if logger:
+            self._logger: logging.Logger = logger
+        else:
+            self._logger: logging.Logger = self.setup_logger()
+        if disable_logger:
+            logging.disable()
         # output
         self._dvs_event_output: DVSEventOutput = dvs_event_output
         self._label_signal_noise: str | None = label_signal_noise  # TODO implement
@@ -231,6 +263,8 @@ class EasyV2EConverter:
         input_file: str,
         output_folder: str,
         dvs_vid: str | None = None,
+        input_start_time: float | None = None,
+        input_stop_time: float | None = None,
         overwrite: bool = False,
         preview: bool = False,
     ) -> None:
@@ -238,7 +272,6 @@ class EasyV2EConverter:
         # input file checking
         self._validate_input(input_file)
         # TODO change to params
-        input_start_time, input_stop_time = None, 2
         self._check_input_time(input_start_time, input_stop_time)
 
         exposure_mode, exposure_val, area_dimension = self._easy_check_dvs_exposure()
@@ -328,12 +361,11 @@ class EasyV2EConverter:
         )
 
         if self._dvs_params is not None:
-            if self._logger:
-                self._logger.warning(
-                    f"dvs_param={self._dvs_params} option overrides your "
-                    f"selected options for threshold, threshold-mismatch, "
-                    f"leak and shot noise rates"
-                )
+            self._logger.warning(
+                f"dvs_param={self._dvs_params} option overrides your "
+                f"selected options for threshold, threshold-mismatch, "
+                f"leak and shot noise rates"
+            )
 
             emulator.set_dvs_params(self._dvs_params)
 
@@ -379,10 +411,9 @@ class EasyV2EConverter:
             src_fps = cap.get(cv2.CAP_PROP_FPS)
             src_num_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             if input_frame_rate is not None:
-                if self._logger:
-                    self._logger.info(
-                        f"Input video frame rate {src_fps}Hz is overridden by parsing input_frame_rate={input_frame_rate}."
-                    )
+                self._logger.info(
+                    f"Input video frame rate {src_fps}Hz is overridden by parsing input_frame_rate={input_frame_rate}."
+                )
                 src_fps = input_frame_rate
 
         if cap is not None:
@@ -394,36 +425,30 @@ class EasyV2EConverter:
             if self._output_width is None and hasattr(cap, "frame_width"):
                 set_size = True
                 self._output_width = cap.frame_width
-            if set_size and self._logger:
+            if set_size:
                 self._logger.warning(
                     f"From input frame automatically set DVS output_width={self._output_width}"
                     f"and/or output_height={self._output_height}. "
                     f"This may not be desired behavior. \nCheck DVS camera sizes arguments."
                 )
-            elif (
-                self._output_height is None
-                or self._output_width is None
-                and self._logger
-            ):
+            elif self._output_height is None or self._output_width is None:
                 self._logger.warning(
                     "Could not read video frame size from video input and so could not automatically set DVS output size. \nCheck DVS camera sizes arguments."
                 )
 
         # Check frame rate and number of frames
         if src_fps == 0:
-            if self._logger:
-                self._logger.error(
-                    "source {} fps is 0; v2e needs to have a timescale "
-                    "for input video".format(input_file)
-                )
+            self._logger.error(
+                "source {} fps is 0; v2e needs to have a timescale "
+                "for input video".format(input_file)
+            )
             v2e_quit()
 
         if src_num_frames < 2:
-            if self._logger:
-                self._logger.warning(
-                    "num frames is less than 2, probably cannot be determined "
-                    "from cv2.CAP_PROP_FRAME_COUNT"
-                )
+            self._logger.warning(
+                "num frames is less than 2, probably cannot be determined "
+                "from cv2.CAP_PROP_FRAME_COUNT"
+            )
             v2e_quit()
 
         return cap, src_fps, src_num_frames
@@ -437,7 +462,7 @@ class EasyV2EConverter:
 
     def _validate_leak_rate(self) -> None:
         """TODO"""
-        if self._leak_rate_hz > 0 and self._sigma_thres == 0 and self._logger:
+        if self._leak_rate_hz > 0 and self._sigma_thres == 0:
             self._logger.warning(
                 "leak_rate_hz>0 but sigma_thres==0, "
                 "so all leak events will be synchronous"
@@ -544,7 +569,7 @@ class EasyV2EConverter:
             slomo_timestamp_tesolution_s = src_frame_interval_s / slowdown_factor
 
             self._logger.info(
-                f"--auto_timestamp_resolution is False, "
+                f"auto_timestamp_resolution is False, "
                 f"srcFps={src_fps}Hz "
                 f"input_slowmotion_factor={self._input_slowmotion_factor}, "
                 f"real src FPS={src_fps*self._input_slowmotion_factor}Hz, "
@@ -573,14 +598,14 @@ class EasyV2EConverter:
                 )
 
                 self._logger.info(
-                    f"--auto_timestamp_resolution=True and "
+                    f"auto_timestamp_resolution=True and "
                     f"timestamp_resolution={eng(self._timestamp_resolution)}s: "
                     f"source video will be automatically upsampled but "
                     f"with at least upsampling factor of {slowdown_factor}"
                 )
             else:
                 self._logger.info(
-                    "--auto_timestamp_resolution=True and "
+                    "auto_timestamp_resolution=True and "
                     "timestamp_resolution is not set: "
                     "source video will be automatically upsampled to "
                     "limit maximum interframe motion to 1 pixel"
@@ -635,8 +660,7 @@ class EasyV2EConverter:
             )
 
         if exposure_mode == ExposureMode.SOURCE:
-            if self._logger:
-                self._logger.info("DVS video exposure mode is SOURCE")
+            self._logger.info("DVS video exposure mode is SOURCE")
             return exposure_mode, None, None
         if exposure_mode == ExposureMode.AREA_COUNT and not len(dvs_exposure) == 3:
             raise ValueError(
@@ -679,7 +703,6 @@ class EasyV2EConverter:
                 exposure_val, area_dimension, area_dimension
             )
 
-        if self._logger:
             self._logger.info(s)
         return exposure_mode, exposure_val, area_dimension
 
@@ -757,12 +780,12 @@ class EasyV2EConverter:
                 self._emulator.output_width = self._output_width
                 self._emulator.output_height = self._output_height
 
-            self._logger.info(
-                f"*** Stage 1/3: "
-                f"Resizing {src_num_frames_to_be_proccessed} input frames "
-                f"to output size "
-                f"(with possible RGB to luma conversion)"
-            )
+                self._logger.info(
+                    f"*** Stage 1/3: "
+                    f"Resizing {src_num_frames_to_be_proccessed} input frames "
+                    f"to output size "
+                    f"(with possible RGB to luma conversion)"
+                )
             for inputFrameIndex in tqdm(
                 range(src_num_frames_to_be_proccessed), desc="rgb2luma", unit="fr"
             ):
@@ -832,7 +855,6 @@ class EasyV2EConverter:
                 ):
                     # interpolated frames are stored to tmpfolder as
                     # 1.png, 2.png, etc
-
                     self._logger.info(
                         f"*** Stage 2/3: SloMo upsampling from " f"{source_frames_dir}"
                     )
