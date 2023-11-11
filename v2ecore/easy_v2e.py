@@ -102,7 +102,7 @@ class EasyV2EConverter:
         output_width: int = None,
         output_height: int = None,
         dvs_model: DVSModel | None = None,
-        disable_slowmo: bool = False,
+        disable_slomo: bool = False,
         input_slowmotion_factor: float = 1.0,
         slomo_model: str | None = None,
         batch_size: int = 8,
@@ -121,75 +121,120 @@ class EasyV2EConverter:
         Parameters
         ----------
         device:
-            device, either 'cpu' or 'cuda' (selected automatically by caller
+            Device, either 'cpu' or 'cuda' (selected automatically by caller
             depending on GPU availability)
         avi_frame_rate:
-            TODO
+            Frame rate of output AVI video files; only affects playback rate.
         auto_timestamp_resolution:
-            TODO
+            (Ignored by disable_slomo or synthetic_input.) If
+            True (default), upsampling_factor is automatically
+            determined to limit maximum movement between frames to
+            1 pixel. If False, timestamp_resolution sets the
+            upsampling factor for input video. Can be combined
+            with timestamp_resolution to ensure DVS events have
+            at most some resolution.
         timestamp_resolution:
-            TODO
+            (Ignored by disable_slomo or synthetic_input.)
+            Desired DVS timestamp resolution in seconds;
+            determines slow motion upsampling factor; the video
+            will be upsampled from source fps to achieve the at
+            least this timestamp resolution.I.e. slowdown_factor =
+            (1/fps)/timestamp_resolution; using a high resolution
+            e.g. of 1ms will result in slow rendering since it
+            will force high upsampling ratio. Can be combind with
+            auto_timestamp_resolution to limit upsampling to a
+            maximum limit value.
         dvs_params:
-            TODO
+            Easy optional setting of parameters for DVS
+            model:None, 'clean', 'noisy'; 'clean' turns off noise,
+            sets unlimited bandwidth and makes threshold variation
+            small. 'noisy' sets limited bandwidth and adds leak
+            events and shot noise.This option by default will
+            disable user set DVS parameters. To use custom DVS
+            paramters, use None here.
         pos_thres:
-            nominal threshold of triggering positive event in log intensity.
+            Nominal threshold of triggering positive event in log intensity.
         neg_thres:
-            nominal threshold of triggering negative event in log intensity.
+            Nominal threshold of triggering negative event in log intensity.
         sigma_thres:
-            std deviation of threshold in log intensity.
+            Std deviation of threshold in log intensity.
         cutoff_hz:
             3dB cutoff frequency in Hz of DVS photoreceptor
         leak_rate_hz:
-            leak event rate per pixel in Hz,
+            Leak event rate per pixel in Hz,
             from junction leakage in reset switch
         shot_noise_rate_hz:
-            shot noise rate in Hz
+            Shot noise rate in Hz
         photoreceptor_noise:
-            model photoreceptor noise to create the desired shot noise rate
+            Model photoreceptor noise to create the desired shot noise rate
         leak_jitter_fraction:
-            TODO
+            Jitter of leak noise events relative to the (FPN)
+            interval, drawn from normal distribution
         noise_rate_cov_decades:
-            TODO
+            Coefficient of Variation of noise rates (shot and
+            leak) in log normal distribution decades across pixel
+            arrayWARNING: currently only in leak events
         refractory_period:
-            TODO
+            Refractory period in seconds, default is 0.5ms.The new
+            event will be ignore if the previous event is
+            triggered less than refractory_period ago.Set to 0 to
+            disable this feature.
         show_dvs_model_state:
             None or 'new_frame','diff_frame' etc; see EventEmulator.MODEL_STATES
         save_dvs_model_state:
-            TODO
+            One or more space separated list model states. Possible
+            models states are (without quotes) either 'all' or
+            chosen from dict_keys(['new_frame', 'log_new_frame',
+            'lp_log_frame', 'scidvs_highpass',
+            'photoreceptor_noise_arr', 'cs_surround_frame',
+            'c_minus_s_frame', 'base_log_frame', 'diff_frame'])
         record_single_pixel_states:
             Record this pixel states to 'pixel_states.npy'
         dvs_emulator_seed:
-            seed for random threshold variations,
+            Seed for random threshold variations,
             fix it to nonzero value to get same mismatch every time
         output_width: int,
-            width of output in pixels
+            Width of output in pixels
         output_height: int,
-            height of output in pixels
+            Height of output in pixels
         dvs_model:
-            TODO
-        disable_slowmo:
-            TODO
+            DVS camera model with example video resolution e.g. DVS128: 128x128
+        disable_slomo:
+            Disables slomo interpolation; the output DVS events
+            will have exactly the timestamp resolution of the
+            source video (which is perhaps modified by
+            input_slowmotion_factor).
         slomo_model:
-            TODO
+            Path of slomo_model checkpoint.
         batch_size:
-            TODO
+            Batch size in frames for SuperSloMo. Batch size 8-16
+            is recommended if your GPU has sufficient memory.
         hdr: bool
             Treat input as HDR floating point logarithmic
             gray scale with 255 input scaled as ln(255)=5.5441
         cs_lambda_pixels:
-            space constant of surround in pixels, or None to disable surround inhibition
+            Space constant of surround in pixels, or None to disable surround inhibition
         cs_tau_p_ms:
-            time constant of lowpass filter of surround in ms or 0 to make surround 'instantaneous'
+            Time constant of lowpass filter of surround in ms or 0 to make surround 'instantaneous'
         scidvs:
             Simulate the high gain adaptive photoreceptor SCIDVS pixel
         dvs_event_output
-            names of output data files or None
+            Names of output data files or None
         label_signal_noise: bool
             Record signal and noise event labels to a CSV file
         dvs_exposure:
-            TODO
+            Mode to finish DVS frame event integration:
+                - duration time: Use fixed accumulation time in seconds, e.g.
+                    dvs_exposure=("duration",".005");
+                - count n: Count n events per frame,e.g.
+                    dvs_exposure=("count","5000");
+                - area_count M N: frame ends when any area of N x N pixels fills with M events, e.g.
+                    dvs_exposure=("area_count","500","64")
+                source: each DVS frame is from one source frame (slomo or original, depending on if slomo is used)
         dvs_vid_full_scale:
-            TODO
+            Set full scale event count histogram count for DVS
+            videos to be this many ON or OFF events for full white
+            or black.
         logger:
             Logger class object to log progress of the module.
         disable_logger:
@@ -222,7 +267,7 @@ class EasyV2EConverter:
         self._output_width: int = output_width
         self._dvs_model: DVSModel = dvs_model  # DVS128 DVS240 DVS346 DVS640 DVS1024
         # slow motion frame synthesis
-        self._disable_slowmo: bool = disable_slowmo
+        self._disable_slomo: bool = disable_slomo
         self._input_slowmotion_factor: bool = input_slowmotion_factor
         self._slomo_model: str | None = slomo_model
         self._batch_size: int = batch_size
@@ -268,7 +313,25 @@ class EasyV2EConverter:
         overwrite: bool = False,
         preview: bool = False,
     ) -> None:
-        """TODO"""
+        """Converts video into event stream
+
+        Parameters
+        ----------
+        input_file: str
+            Path to input file, that will be converted.
+        output_folder: str
+            Path to output directory.
+        dvs_vid: str
+            TODO
+        input_start_time: float
+            TODO
+        input_stop_time: float
+            TODO
+        overwrite: bool
+            TODO
+        preview: bool
+            TODO
+        """
         # input file checking
         self._validate_input(input_file)
         # TODO change to params
@@ -288,7 +351,7 @@ class EasyV2EConverter:
             src_num_frames_to_be_proccessed,
             start_time,
             stop_time,
-        ) = self._validate_slowmo(
+        ) = self._validate_slomo(
             dvs_fps, src_num_frames, input_start_time, input_stop_time
         )
 
@@ -372,6 +435,8 @@ class EasyV2EConverter:
         return emulator
 
     def _check_input_time(self, input_start_time, input_stop_time) -> tuple:
+        """TODO"""
+
         def is_float(element: Any) -> bool:
             try:
                 float(element)
@@ -481,7 +546,7 @@ class EasyV2EConverter:
     def _validate_video_parameters(self) -> None:
         """TODO"""
         if (
-            not self._disable_slowmo
+            not self._disable_slomo
             and self._auto_timestamp_resolution is False
             and self._timestamp_resolution is None
         ):
@@ -503,7 +568,7 @@ class EasyV2EConverter:
                 f"Limiting automatic upsampling to maximum timestamp interval."
             )
 
-    def _validate_slowmo(
+    def _validate_slomo(
         self,
         src_fps: float,
         src_num_frames: float,
@@ -537,7 +602,7 @@ class EasyV2EConverter:
         src_frame_interval_s = (1.0 / src_fps) / self._input_slowmotion_factor
 
         slowdown_factor = NO_SLOWDOWN
-        if self._disable_slowmo:
+        if self._disable_slomo:
             self._logger.warning(
                 "slomo interpolation disabled by command line option; "
                 "output DVS timestamps will have source frame interval "
@@ -612,7 +677,7 @@ class EasyV2EConverter:
                 )
 
         # the SloMo model, set no SloMo model if no slowdown
-        if not self._disable_slowmo and (
+        if not self._disable_slomo and (
             self._auto_timestamp_resolution or slowdown_factor != NO_SLOWDOWN
         ):
             self._slomo = SuperSloMo(
