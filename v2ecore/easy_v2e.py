@@ -334,7 +334,6 @@ class EasyV2EConverter:
         """
         # input file checking
         self._validate_input(input_file)
-        # TODO change to params
         self._check_input_time(input_start_time, input_stop_time)
 
         exposure_mode, exposure_val, area_dimension = self._easy_check_dvs_exposure()
@@ -392,6 +391,7 @@ class EasyV2EConverter:
             dvs_aedat2,
             dvs_aedat4,
             dvs_text,
+            dvs_lava,
         ) = self._validate_dvs_output(output_file)
         emulator = EventEmulator(
             pos_thres=self._pos_thres,
@@ -410,6 +410,7 @@ class EasyV2EConverter:
             dvs_aedat2=dvs_aedat2,
             dvs_aedat4=dvs_aedat4,
             dvs_text=dvs_text,
+            dvs_lava=dvs_lava,
             show_dvs_model_state=self._show_dvs_model_state,
             save_dvs_model_state=self._save_dvs_model_state,
             output_width=self._output_width,
@@ -629,7 +630,7 @@ class EasyV2EConverter:
                     "numerical errors in SuperSloMo can cause noise "
                     "that makes fake events at the upsampling rate. "
                     "Recommend to set physical cutoff_hz, "
-                    "e.g. --cutoff_hz=200 (or leave the default cutoff_hz)"
+                    "e.g. cutoff_hz=200 (or leave the default cutoff_hz)"
                 )
             slomo_timestamp_tesolution_s = src_frame_interval_s / slowdown_factor
 
@@ -788,7 +789,6 @@ class EasyV2EConverter:
         src_video_real_processed_duration = (
             stop_time - start_time
         ) / self._input_slowmotion_factor
-        num_frames = src_num_frames_to_be_proccessed
         inputHeight = None
         inputWidth = None
         inputChannels = None
@@ -837,7 +837,7 @@ class EasyV2EConverter:
                     "output size ({}x{}) was set automatically to "
                     "input video size\n    Are you sure you want this? "
                     "It might be slow.\n Consider using\n "
-                    "    --output_width=346 --output_height=260\n "
+                    "  output_width=346 output_height=260\n "
                     "to match Davis346.".format(self._output_width, self._output_height)
                 )
 

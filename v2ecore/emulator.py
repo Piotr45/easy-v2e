@@ -28,6 +28,7 @@ from v2ecore.emulator_utils import subtract_leak_current
 from v2ecore.output.ae_text_output import DVSTextOutput
 from v2ecore.output.aedat2_output import AEDat2Output
 from v2ecore.output.aedat4_output import AEDat4Output
+from v2ecore.output.lava_binary_output import LAVABinaryOutput
 from v2ecore.v2e_utils import checkAddSuffix, v2e_quit, video_writer
 
 # import rosbag # not yet for python 3
@@ -113,6 +114,7 @@ class EventEmulator(object):
         dvs_aedat2: str = None,
         dvs_aedat4: str = None,
         dvs_text: str = None,
+        dvs_lava: str = None,
         # change as you like to see 'baseLogFrame',
         # 'lpLogFrame', 'diff_frame'
         show_dvs_model_state: str = None,
@@ -148,7 +150,7 @@ class EventEmulator(object):
         seed: int, default=0
             seed for random threshold variations,
             fix it to nonzero value to get same mismatch every time
-        dvs_aedat2, dvs_aedat4, dvs_h5, dvs_text: str
+        dvs_aedat2, dvs_aedat4, dvs_h5, dvs_text, dvs_lava: str
             names of output data files or None
         show_dvs_model_state: List[str],
             None or 'new_frame','diff_frame' etc; see EventEmulator.MODEL_STATES
@@ -226,8 +228,8 @@ class EventEmulator(object):
         self.noise_rate_cov_decades = noise_rate_cov_decades
 
         self.SHOT_NOISE_INTEN_FACTOR = (
-            0.25
-        )  # this factor models the slight increase of shot noise with intensity
+            0.25  # this factor models the slight increase of shot noise with intensity
+        )
 
         # output properties
         self.output_folder = output_folder
@@ -257,6 +259,7 @@ class EventEmulator(object):
         self.dvs_aedat2 = dvs_aedat2
         self.dvs_aedat4 = dvs_aedat4
         self.dvs_text = dvs_text
+        self.dvs_lava = dvs_lava
 
         # event stats
         self.num_events_total = 0
@@ -278,9 +281,9 @@ class EventEmulator(object):
             self.cs_tau_h_ms = (
                 0
                 if (self.cs_tau_p_ms is None or self.cs_tau_p_ms == 0)
-                else self.cs_tau_p_ms / (self.cs_lambda_pixels ** 2)
+                else self.cs_tau_p_ms / (self.cs_lambda_pixels**2)
             )
-            lat_res = 1 / (self.cs_lambda_pixels ** 2)
+            lat_res = 1 / (self.cs_lambda_pixels**2)
             trans_cond = 1 / self.cs_lambda_pixels
             logger.debug(
                 f"lateral resistance R={lat_res:.2g}Ohm, transverse transconductance g={trans_cond:.2g} Siemens, Rg={(lat_res * trans_cond):.2f}"
@@ -386,6 +389,12 @@ class EventEmulator(object):
                     path, label_signal_noise=self.label_signal_noise
                 )
 
+            if dvs_lava:
+                path = os.path.join(self.output_folder, dvs_lava)
+                path = checkAddSuffix(path, ".bin")
+                logger.info("opening AEDAT-4.0 output file " + path)
+                self.dvs_lava = LAVABinaryOutput(path)
+
         except Exception as e:
             logger.error(
                 f'Output file exception "{e}" (maybe you need to specify a supported DVS camera type?)'
@@ -463,6 +472,9 @@ class EventEmulator(object):
 
         if self.dvs_aedat4 is not None:
             self.dvs_aedat4.close()
+
+        if self.dvs_lava is not None:
+            self.dvs_lava.close()
 
         if self.dvs_text is not None:
             try:
@@ -630,8 +642,7 @@ class EventEmulator(object):
         )
 
     def reset(self):
-        """resets so that next use will reinitialize the base frame
-        """
+        """resets so that next use will reinitialize the base frame"""
         self.num_events_total = 0
         self.num_events_on = 0
         self.num_events_off = 0
@@ -830,9 +841,7 @@ class EventEmulator(object):
                     self.lp_log_frame - self.cs_surround_frame
                 )  # init base log frame (input to diff) to DC value, TODO check might not be correct to avoid transient
 
-            return (
-                None
-            )  # on first input frame we just setup the state of all internal nodes of pixels
+            return None  # on first input frame we just setup the state of all internal nodes of pixels
 
         if self.scidvs:
             if self.scidvs_highpass is None:
@@ -1128,6 +1137,9 @@ class EventEmulator(object):
             if self.dvs_aedat4 is not None:
                 self.dvs_aedat4.appendEvents(events, signnoise_label=signnoise_label)
 
+            if self.dvs_lava is not None:
+                self.dvs_lava.appendEvents(events, signnoise_label=signnoise_label)
+
             if self.dvs_text is not None:
                 if self.label_signal_noise:
                     self.dvs_text.appendEvents(events, signnoise_label=signnoise_label)
@@ -1187,21 +1199,18 @@ class EventEmulator(object):
         # assign new time
         self.t_previous = t_frame
         if len(events) > 0:
-
             # debug TODO remove
             tsout = events[:, 0]
             tsoutdiff = np.diff(tsout)
             if np.any(tsoutdiff < 0):
                 print("nonmonotonic timestamp in events")
 
-            return (
-                events
-            )  # ndarray shape (N,4) where N is the number of events are rows are [t,x,y,p]. Confirmed by Tobi Oct 2023
+            return events  # ndarray shape (N,4) where N is the number of events are rows are [t,x,y,p]. Confirmed by Tobi Oct 2023
         else:
             return None
 
     def get_event_list_from_coords(self, pos_event_xy, neg_event_xy, ts):
-        """ Gets event list from ON and OFF event coordinate lists.
+        """Gets event list from ON and OFF event coordinate lists.
         :param pos_event_xy: Tensor[2,n] where n is number of ON events, [0,n] are y addresses and [1,n] are x addresses
         :param neg_event_xy: Tensor[2,m] where m is number of ON events, [0,m] are y addresses and [1,m] are x addresses
         :param ts: the timestamp given to all events (scalar)
@@ -1259,7 +1268,7 @@ class EventEmulator(object):
                 else self.cs_tau_p_ms * 1e-3
             )
             tau_h = (
-                abs_min_tau_p / (self.cs_lambda_pixels ** 2)
+                abs_min_tau_p / (self.cs_lambda_pixels**2)
                 if (self.cs_tau_h_ms is None or self.cs_tau_h_ms == 0)
                 else self.cs_tau_h_ms * 1e-3
             )

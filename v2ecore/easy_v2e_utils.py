@@ -64,6 +64,9 @@ class DVSEventOutput(enum.Enum):
     DVS_TEXT:
         Output DVS events as text file with one event per
         line [timestamp (float s), x, y, polarity (0,1)].
+    DVS_LAVA:
+        Output DVS events as binary file with one event per
+        line [x, y, polarity (0,1), timestamp (int ms)].
     """
 
     DDD_OUTPUT = 0
@@ -71,6 +74,7 @@ class DVSEventOutput(enum.Enum):
     DVS_AEDAT2 = ".aedat"
     DVS_AEDAT4 = ".aedat4"
     DVS_TEXT = ".txt"
+    DVS_LAVA = ".bin"
 
     @classmethod
     def list(cls):

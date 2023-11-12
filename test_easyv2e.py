@@ -72,7 +72,9 @@ def main() -> None:
         auto_timestamp_resolution=False,
         cutoff_hz=15,
         dvs_model=DVSModel.DVS346,
+        dvs_event_output=DVSEventOutput.DVS_LAVA,
         slomo_model=args.slomo_model,
+        disable_slomo=True
     )
 
     converter.convert_video(
